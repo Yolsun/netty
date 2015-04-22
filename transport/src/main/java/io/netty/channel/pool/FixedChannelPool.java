@@ -149,7 +149,7 @@ public final class FixedChannelPool<C extends Channel, K extends ChannelPoolKey>
                         assert executor.inEventLoop();
                         for (;;) {
                             AcquireTask<C, K> task = pendingAcquireQueue.peek();
-                            if (task == null || task.nanos >= nanoTime) {
+                            if (task == null || task.creationTime >= nanoTime) {
                                 break;
                             }
                             pendingAcquireQueue.remove();
@@ -168,7 +168,7 @@ public final class FixedChannelPool<C extends Channel, K extends ChannelPoolKey>
                         assert executor.inEventLoop();
                         for (;;) {
                             AcquireTask<C, K> task = pendingAcquireQueue.peek();
-                            if (task == null || task.nanos >= nanoTime) {
+                            if (task == null || task.creationTime >= nanoTime) {
                                 break;
                             }
                             pendingAcquireQueue.remove();
@@ -310,9 +310,9 @@ public final class FixedChannelPool<C extends Channel, K extends ChannelPoolKey>
     }
 
     private static final class AcquireTask<C, K> {
-        private final K key;
-        private final Promise<C> promise;
-        private final long nanos = System.nanoTime();
+        final K key;
+        final Promise<C> promise;
+        final long creationTime = System.nanoTime();
 
         public AcquireTask(final K key, Promise<C> promise) {
             this.key = key;

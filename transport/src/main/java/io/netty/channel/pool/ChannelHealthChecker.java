@@ -20,7 +20,6 @@ import io.netty.channel.EventLoop;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.Promise;
 
-
 /**
  * Called before a {@link Channel} will be returned via {@link ChannelPool#acquire(ChannelPoolKey)} or
  * {@link ChannelPool#acquire(ChannelPoolKey, Promise)}.
