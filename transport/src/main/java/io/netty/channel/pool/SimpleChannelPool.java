@@ -236,8 +236,8 @@ public class SimpleChannelPool<C extends Channel, K extends ChannelPoolKey> impl
             }
 
         } catch (Throwable cause) {
-            promise.setFailure(cause);
             channel.close();
+            promise.setFailure(cause);
         }
         return promise;
     }

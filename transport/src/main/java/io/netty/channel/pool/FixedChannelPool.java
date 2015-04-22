@@ -55,7 +55,7 @@ public final class FixedChannelPool<C extends Channel, K extends ChannelPoolKey>
     private final long acquireTimeoutNanos;
     private final Runnable timeoutTask;
 
-    // There is no need to worry about synchronzation as everything that modified the queue or counts is done
+    // There is no need to worry about synchronization as everything that modified the queue or counts is done
     // by the above EventExecutor.
     private final Queue<AcquireTask<C, K>> pendingAcquireQueue = new ArrayDeque<AcquireTask<C, K>>();
     private final int maxConnections;
@@ -142,42 +142,20 @@ public final class FixedChannelPool<C extends Channel, K extends ChannelPoolKey>
             acquireTimeoutNanos = TimeUnit.MILLISECONDS.toNanos(acquireTimeoutMillis);
             switch (action) {
             case Fail:
-                timeoutTask = new Runnable() {
+                timeoutTask = new TimeoutTask() {
                     @Override
-                    public void run() {
-                        long nanoTime = System.nanoTime() - acquireTimeoutNanos;
-                        assert executor.inEventLoop();
-                        for (;;) {
-                            AcquireTask<C, K> task = pendingAcquireQueue.peek();
-                            if (task == null || task.creationTime >= nanoTime) {
-                                break;
-                            }
-                            pendingAcquireQueue.remove();
-
-                            --pendingAcquireCount;
-                            task.promise.setFailure(TIMEOUT_EXCEPTION);
-                        }
+                    public void onTimeOut(AcquireTask<C, K> task) {
+                        task.promise.setFailure(TIMEOUT_EXCEPTION);
                     }
                 };
                 break;
             case NewConnection:
-                timeoutTask = new Runnable() {
+                timeoutTask = new TimeoutTask() {
                     @Override
-                    public void run() {
-                        long nanoTime = System.nanoTime() - acquireTimeoutNanos;
-                        assert executor.inEventLoop();
-                        for (;;) {
-                            AcquireTask<C, K> task = pendingAcquireQueue.peek();
-                            if (task == null || task.creationTime >= nanoTime) {
-                                break;
-                            }
-                            pendingAcquireQueue.remove();
+                    public void onTimeOut(AcquireTask<C, K> task) {
+                        ++acquiredChannelCount;
 
-                            ++acquiredChannelCount;
-                            --pendingAcquireCount;
-
-                            FixedChannelPool.super.acquire(task.key, task.promise);
-                        }
+                        FixedChannelPool.super.acquire(task.key, task.promise);
                     }
                 };
                 break;
@@ -318,5 +296,25 @@ public final class FixedChannelPool<C extends Channel, K extends ChannelPoolKey>
             this.key = key;
             this.promise = promise;
         }
+    }
+
+    private abstract class TimeoutTask implements Runnable {
+        @Override
+        public final void run() {
+            long expiredThresholdTime = System.nanoTime() - acquireTimeoutNanos;
+            assert executor.inEventLoop();
+            for (;;) {
+                AcquireTask<C, K> task = pendingAcquireQueue.peek();
+                if (task == null || task.creationTime >= expiredThresholdTime) {
+                    break;
+                }
+                pendingAcquireQueue.remove();
+
+                --pendingAcquireCount;
+                onTimeOut(task);
+            }
+        }
+
+        public abstract void onTimeOut(AcquireTask<C, K> task);
     }
 }
