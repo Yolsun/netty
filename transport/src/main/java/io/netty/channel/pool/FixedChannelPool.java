@@ -15,137 +15,156 @@
  */
 package io.netty.channel.pool;
 
+import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
-import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelFutureListener;
+import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.FutureListener;
-import io.netty.util.concurrent.ImmediateEventExecutor;
 import io.netty.util.concurrent.Promise;
 import io.netty.util.internal.EmptyArrays;
+import io.netty.util.internal.OneTimeTask;
 
+import java.util.ArrayDeque;
 import java.util.Queue;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.LinkedBlockingDeque;
-import java.util.concurrent.atomic.AtomicInteger;
-
-import static io.netty.util.internal.ObjectUtil.checkNotNull;
-
 /**
  * {@link ChannelPool} implementation that takes another {@link ChannelPool} implementation and enfore a maximum
  * number of concurrent connections.
  *
- * TODO: Fix me!
  * @param <C>   the {@link Channel} type to pool.
  * @param <K>   the {@link ChannelPoolKey} that is used to store and lookup the {@link Channel}s.
  */
-public final class FixedChannelPool<C extends Channel, K extends ChannelPoolKey> implements ChannelPool<C, K> {
+public final class FixedChannelPool<C extends Channel, K extends ChannelPoolKey> extends SimpleChannelPool<C, K> {
     private static final IllegalStateException FULL_EXCEPTION =
             new IllegalStateException("Too many outstanding acquire operations");
     static {
         FULL_EXCEPTION.setStackTrace(EmptyArrays.EMPTY_STACK_TRACE);
     }
-    private final AtomicInteger acquiredChannelCount = new AtomicInteger();
-    private final Queue<AcquireTask<C, K>> pendingAcquireQueue;
-    private final FutureListener<C> decrementListener = new FutureListener<C>() {
-        @Override
-        public void operationComplete(Future<C> future) throws Exception {
-            if (future.isSuccess()) {
-                future.getNow().closeFuture().addListener(closeListener);
-            } else {
-                acquiredChannelCount.decrementAndGet();
-                runTaskQueue();
-            }
-        }
-    };
-    private final FutureListener<Boolean> runListener = new FutureListener<Boolean>() {
-        @Override
-        public void operationComplete(Future<Boolean> future) throws Exception {
-            runTaskQueue();
-        }
-    };
-    private final ChannelFutureListener closeListener = new ChannelFutureListener() {
-        @Override
-        public void operationComplete(ChannelFuture future) throws Exception {
-            // The channel was closed so try to process the taskqueue again as this means we lost one connection out
-            // of the pool.
-            runTaskQueue();
-        }
-    };
 
-    private final ChannelPool<C, K> pool;
+    private final EventExecutor executor;
+
+    // There is no need to worry about synchronzation as everything that modified the queue or counts is done
+    // by the above EventExecutor.
+    private final Queue<AcquireTask<C, K>> pendingAcquireQueue = new ArrayDeque<AcquireTask<C, K>>();
     private final int maxConnections;
+    private final int maxPendingAcquires;
+    private int acquiredChannelCount;
+    private int pendingAcquireCount;
 
-    public FixedChannelPool(ChannelPool<C, K> pool, int maxConnections) {
-        this(pool, maxConnections, new ConcurrentLinkedQueue<AcquireTask<C, K>>());
+    public FixedChannelPool(Bootstrap bootstrap,
+                            ChannelPoolHandler<C, K> handler, int maxConnections) {
+        this(bootstrap, handler, maxConnections, Integer.MAX_VALUE);
     }
 
-    public FixedChannelPool(ChannelPool<C, K> pool, int maxConnections, int maxPendingAcquires) {
-        this(pool, maxConnections, new LinkedBlockingDeque<AcquireTask<C, K>>(maxPendingAcquires));
-    }
-
-    private FixedChannelPool(ChannelPool<C, K> pool, int maxConnections, Queue<AcquireTask<C, K>> pendingAcquireQueue) {
-        if (maxConnections < 1) {
-            throw new IllegalArgumentException("maxConnections: " + maxConnections + " (expected: >= 1)");
-        }
-        this.pool = checkNotNull(pool, "pool");
-        this.pendingAcquireQueue = checkNotNull(pendingAcquireQueue, "pendingAcquireQueue");
+    public FixedChannelPool(Bootstrap bootstrap,
+                            ChannelPoolHandler<C, K> handler, int maxConnections, int maxPendingAcquires) {
+        super(bootstrap, handler);
+        executor = bootstrap.group().next();
         this.maxConnections = maxConnections;
+        this.maxPendingAcquires = maxPendingAcquires;
+    }
+
+    public FixedChannelPool(Bootstrap bootstrap,
+                            ChannelPoolHandler<C, K> handler,
+                            ChannelHealthChecker<C, K> healthCheck,
+                            ChannelPoolSegmentFactory<C> segmentFactory,
+                            int maxConnections, int maxPendingAcquires) {
+        super(bootstrap, handler, healthCheck, segmentFactory);
+        executor = bootstrap.group().next();
+        this.maxConnections = maxConnections;
+        this.maxPendingAcquires = maxPendingAcquires;
     }
 
     @Override
-    public Future<C> acquire(K key) {
-        return acquire(key, ImmediateEventExecutor.INSTANCE.<C>newPromise());
-    }
-
-    @Override
-    public Future<Boolean> release(C channel) {
-        return release(channel, ImmediateEventExecutor.INSTANCE.<Boolean>newPromise());
-    }
-
-    @Override
-    public Future<C> acquire(K key, Promise<C> promise) {
-        if (acquiredChannelCount.incrementAndGet() <= maxConnections) {
-            promise.addListener(decrementListener);
-            return pool.acquire(key, promise);
-        }
-        if (!pendingAcquireQueue.offer(new AcquireTask<C, K>(key, promise))) {
-            acquiredChannelCount.decrementAndGet();
-            promise.setFailure(FULL_EXCEPTION);
+    public Future<C> acquire(final K key, final Promise<C> promise) {
+        try {
+            final Promise<C> p = executor.newPromise();
+            if (executor.inEventLoop()) {
+                acquire0(key, promise, p);
+            } else {
+                executor.execute(new OneTimeTask() {
+                    @Override
+                    public void run() {
+                        acquire0(key, promise, p);
+                    }
+                });
+            }
+            return p;
+        } catch (Throwable cause) {
+            promise.setFailure(cause);
         }
         return promise;
     }
 
-    @Override
-    public Future<Boolean> release(C channel, Promise<Boolean> promise) {
-        if (channel.isActive()) {
-            Future<Boolean> f = pool.release(channel, promise);
-            if (f.isDone()) {
-                runTaskQueue();
-            } else {
-                f.addListener(runListener);
+    private void acquire0(K key, final Promise<C> originalPromise, Promise<C> p) {
+        assert executor.inEventLoop();
+
+        p.addListener(new FutureListener<C>() {
+            @Override
+            public void operationComplete(Future<C> future) throws Exception {
+                assert executor.inEventLoop();
+
+                if (future.isSuccess()) {
+                    originalPromise.setSuccess(future.getNow());
+                } else {
+                    // Something went wrong try to run pending acquire tasks.
+                    --acquiredChannelCount;
+                    runTaskQueue();
+                    originalPromise.setFailure(future.cause());
+                }
             }
-            return f;
+        });
+        if (acquiredChannelCount < maxConnections) {
+            ++acquiredChannelCount;
+            super.acquire(key, p);
         } else {
-            return promise.setSuccess(Boolean.FALSE);
+            if (++pendingAcquireCount > maxPendingAcquires) {
+                originalPromise.setFailure(FULL_EXCEPTION);
+            } else {
+                pendingAcquireQueue.offer(new AcquireTask<C, K>(key, p));
+            }
         }
     }
 
-    private void runTaskQueue() {
-        for (;;) {
-            if (acquiredChannelCount.decrementAndGet() <= maxConnections) {
-                AcquireTask<C, K> task = pendingAcquireQueue.poll();
-                if (task == null) {
-                    // increment again as we was not able to poll a task.
-                    acquiredChannelCount.incrementAndGet();
-                    break;
+    @Override
+    public Future<Boolean> release(final C channel, final Promise<Boolean> promise) {
+        try {
+            final Promise<Boolean> p = executor.newPromise();
+            super.release(channel, p.addListener(new FutureListener<Boolean>() {
+
+                @Override
+                public void operationComplete(Future<Boolean> future) throws Exception {
+                    assert executor.inEventLoop();
+
+                    if (future.isSuccess()) {
+                        Boolean result = future.getNow();
+                        if (result == Boolean.TRUE) {
+                            --acquiredChannelCount;
+                            runTaskQueue();
+                        }
+                        promise.setSuccess(result);
+                    } else {
+                        promise.setFailure(future.cause());
+                    }
                 }
-                Promise<C> promise = task.promise;
-                promise.addListener(decrementListener);
-                pool.acquire(task.key, promise);
-            } else {
+            }));
+            return p;
+        } catch (Throwable cause) {
+            promise.setFailure(cause);
+        }
+        return promise;
+    }
+
+    private void runTaskQueue() {
+        assert executor.inEventLoop();
+
+        while (acquiredChannelCount <= maxConnections) {
+            AcquireTask<C, K> task = pendingAcquireQueue.poll();
+            if (task == null) {
                 break;
             }
+            --pendingAcquireCount;
+            ++acquiredChannelCount;
+            super.acquire(task.key, task.promise);
         }
     }
 

@@ -40,14 +40,14 @@ import static io.netty.util.internal.ObjectUtil.checkNotNull;
  * @param <C>   the {@link Channel} type to pool.
  * @param <K>   the {@link ChannelPoolKey} that is used to store and lookup the {@link Channel}s.
  */
-public final class SimpleChannelPool<C extends Channel, K extends ChannelPoolKey> implements ChannelPool<C, K> {
+public class SimpleChannelPool<C extends Channel, K extends ChannelPoolKey> implements ChannelPool<C, K> {
 
     private static final AttributeKey<ChannelPoolKey> KEY = AttributeKey.newInstance("channelPoolKey");
     private final ConcurrentMap<ChannelPoolKey, ChannelPoolSegment<C>> pool = PlatformDependent.newConcurrentHashMap();
     private final ChannelPoolHandler<C, K> handler;
     private final ChannelHealthChecker<C, K> healthCheck;
     private final ChannelPoolSegmentFactory<C> segmentFactory;
-    private final Bootstrap bootstrap;
+    final Bootstrap bootstrap;
 
     public SimpleChannelPool(Bootstrap bootstrap, final ChannelPoolHandler<C, K> handler) {
         this(bootstrap, handler,
@@ -73,13 +73,17 @@ public final class SimpleChannelPool<C extends Channel, K extends ChannelPoolKey
         });
     }
 
-    @Override
-    public Future<C> acquire(K key) {
+    final EventLoop loop(K key) {
         EventLoop loop = key.eventLoop();
         if (loop == null) {
             loop = bootstrap.group().next();
         }
-        return acquire(key, loop.<C>newPromise());
+        return loop;
+    }
+
+    @Override
+    public final Future<C> acquire(K key) {
+        return acquire(key, loop(key).<C>newPromise());
     }
 
     @Override
@@ -150,13 +154,7 @@ public final class SimpleChannelPool<C extends Channel, K extends ChannelPoolKey
 
     private void newChannel(
             final K key, final Promise<C> promise) {
-        Bootstrap bs;
-        EventLoop loop = key.eventLoop();
-        if (loop != null) {
-            bs = bootstrap.clone(loop);
-        } else {
-            bs = bootstrap.clone();
-        }
+        Bootstrap bs = bootstrap.clone(loop(key));
         ChannelFuture f = bs.attr(KEY, key).connect(key.remoteAddress());
         if (f.isDone()) {
             notifyConnect(f, key, promise);
@@ -183,7 +181,7 @@ public final class SimpleChannelPool<C extends Channel, K extends ChannelPoolKey
     }
 
     @Override
-    public Future<Boolean> release(C channel) {
+    public final Future<Boolean> release(C channel) {
         return release(channel, channel.eventLoop().<Boolean>newPromise());
     }
 

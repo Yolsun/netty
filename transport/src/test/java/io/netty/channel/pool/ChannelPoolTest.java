@@ -133,8 +133,8 @@ public class ChannelPoolTest {
         final AtomicInteger acquiredCount = new AtomicInteger(0);
         final AtomicInteger releasedCount = new AtomicInteger(0);
 
-        ChannelPool<Channel, ChannelPoolKey> pool =  new FixedChannelPool<Channel, ChannelPoolKey>(
-                new SimpleChannelPool<Channel, ChannelPoolKey>(cb, new ChannelPoolHandler<Channel, ChannelPoolKey>() {
+        ChannelPool<Channel, ChannelPoolKey> pool
+                = new FixedChannelPool<Channel, ChannelPoolKey>(cb, new ChannelPoolHandler<Channel, ChannelPoolKey>() {
                     @Override
                     public void channelCreated(Channel ch, ChannelPoolKey key) {
                         channelCount.incrementAndGet();
@@ -151,7 +151,7 @@ public class ChannelPoolTest {
                                                 @SuppressWarnings("unused") ChannelPoolKey key) {
                         acquiredCount.incrementAndGet();
                     }
-                }), 1);
+                }, 1, Integer.MAX_VALUE);
 
         ChannelPoolKey key = new DefaultChannelPoolKey(addr);
         Channel channel = pool.acquire(key).sync().getNow();
