@@ -73,7 +73,7 @@ public class SimpleChannelPool<C extends Channel, K extends ChannelPoolKey> impl
         });
     }
 
-    final EventLoop loop(K key) {
+    private EventLoop loop(K key) {
         EventLoop loop = key.eventLoop();
         if (loop == null) {
             loop = bootstrap.group().next();
