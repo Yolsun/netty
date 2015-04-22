@@ -68,13 +68,9 @@ public final class DefaultChannelPoolKey implements ChannelPoolKey {
             return true;
         }
         ChannelPoolKey key = (ChannelPoolKey) obj;
-        if (!remoteAddress.equals(key.remoteAddress())) {
-            return false;
-        }
-        if (loop != null && !loop.equals(key.eventLoop())) {
-            return false;
-        }
-        if (loop == null && key.eventLoop() != null || key.eventLoop() == null && loop != null) {
+        if (!remoteAddress.equals(key.remoteAddress()) ||
+            (loop != null && (!loop.equals(key.eventLoop()))) &&
+            key.eventLoop() != null || key.eventLoop() == null && loop != null) {
             return false;
         }
         return true;
