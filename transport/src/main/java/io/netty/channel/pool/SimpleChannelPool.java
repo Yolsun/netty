@@ -47,13 +47,30 @@ public class SimpleChannelPool<C extends Channel, K extends ChannelPoolKey> impl
     private final ChannelPoolHandler<C, K> handler;
     private final ChannelHealthChecker<C, K> healthCheck;
     private final ChannelPoolSegmentFactory<C> segmentFactory;
-    final Bootstrap bootstrap;
+    private final Bootstrap bootstrap;
 
+    /**
+     * Creates a new instance using the {@link ActiveChannelHealthChecker} and a {@link ChannelPoolSegmentFactory} that
+     * process things in LIFO order.
+     *
+     * @param bootstrap         the {@link Bootstrap} that is used for connections
+     * @param handler           the {@link ChannelPoolHandler} that will be notified for the different pool actions
+     */
     public SimpleChannelPool(Bootstrap bootstrap, final ChannelPoolHandler<C, K> handler) {
         this(bootstrap, handler,
              ActiveChannelHealthChecker.<C, K>instance(), ChannelPoolSegmentFactories.<C>newLifoFactory());
     }
 
+    /**
+     * Creates a new instance.
+     *
+     * @param bootstrap         the {@link Bootstrap} that is used for connections
+     * @param handler           the {@link ChannelPoolHandler} that will be notified for the different pool actions
+     * @param healthCheck       the {@link ChannelHealthChecker} that will be used to check if a {@link Channel} is
+     *                          still healty when obtain from the {@link ChannelPool}
+     * @param segmentFactory    the {@link ChannelPoolSegmentFactory} that will be used to create new
+     *                          {@link ChannelPoolSegment}s when needed
+     */
     public SimpleChannelPool(Bootstrap bootstrap, final ChannelPoolHandler<C, K> handler,
                              final ChannelHealthChecker<C, K> healthCheck,
                              final ChannelPoolSegmentFactory<C> segmentFactory) {
