@@ -26,6 +26,9 @@ import io.netty.util.internal.OneTimeTask;
 
 import java.util.ArrayDeque;
 import java.util.Queue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+
 /**
  * {@link ChannelPool} implementation that takes another {@link ChannelPool} implementation and enfore a maximum
  * number of concurrent connections.
@@ -36,11 +39,21 @@ import java.util.Queue;
 public final class FixedChannelPool<C extends Channel, K extends ChannelPoolKey> extends SimpleChannelPool<C, K> {
     private static final IllegalStateException FULL_EXCEPTION =
             new IllegalStateException("Too many outstanding acquire operations");
+    private static final TimeoutException TIMEOUT_EXCEPTION =
+            new TimeoutException("Acquire operation took longer then configured maximum time");
     static {
         FULL_EXCEPTION.setStackTrace(EmptyArrays.EMPTY_STACK_TRACE);
+        TIMEOUT_EXCEPTION.setStackTrace(EmptyArrays.EMPTY_STACK_TRACE);
+    }
+
+    enum AcquireTimeoutAction {
+        NewConnection,
+        Fail
     }
 
     private final EventExecutor executor;
+    private final long acquireTimeoutNanos;
+    private final Runnable timeoutTask;
 
     // There is no need to worry about synchronzation as everything that modified the queue or counts is done
     // by the above EventExecutor.
@@ -79,6 +92,8 @@ public final class FixedChannelPool<C extends Channel, K extends ChannelPoolKey>
                             ChannelPoolHandler<C, K> handler, int maxConnections, int maxPendingAcquires) {
         super(bootstrap, handler);
         executor = bootstrap.group().next();
+        timeoutTask = null;
+        acquireTimeoutNanos = -1;
         this.maxConnections = maxConnections;
         this.maxPendingAcquires = maxPendingAcquires;
     }
@@ -92,6 +107,10 @@ public final class FixedChannelPool<C extends Channel, K extends ChannelPoolKey>
      *                              still healty when obtain from the {@link ChannelPool}
      * @param segmentFactory        the {@link ChannelPoolSegmentFactory} that will be used to create new
      *                              {@link ChannelPoolSegmentFactory.ChannelPoolSegment}s when needed
+     * @param action                the {@link AcquireTimeoutAction} to use or {@code null} if non should be used.
+     *                              In this case {@param acquireTimeoutMillis} must be {@code -1}.
+     * @param acquireTimeoutMillis  the time (in milliseconds) after which an pending acquire must complete or
+     *                              the {@link AcquireTimeoutAction} takes place.
      * @param maxConnections        the numnber of maximal active connections, once this is reached new tries to
      *                              acquire a {@link Channel} will be delayed until a connection is returned to the
      *                              pool again.
@@ -101,7 +120,8 @@ public final class FixedChannelPool<C extends Channel, K extends ChannelPoolKey>
     public FixedChannelPool(Bootstrap bootstrap,
                             ChannelPoolHandler<C, K> handler,
                             ChannelHealthChecker<C, K> healthCheck,
-                            ChannelPoolSegmentFactory<C> segmentFactory,
+                            ChannelPoolSegmentFactory<C> segmentFactory, AcquireTimeoutAction action,
+                            final long acquireTimeoutMillis,
                             int maxConnections, int maxPendingAcquires) {
         super(bootstrap, handler, healthCheck, segmentFactory);
         if (maxConnections < 1) {
@@ -109,6 +129,57 @@ public final class FixedChannelPool<C extends Channel, K extends ChannelPoolKey>
         }
         if (maxPendingAcquires < 1) {
             throw new IllegalArgumentException("maxPendingAcquires: " + maxPendingAcquires + " (expected: >= 1)");
+        }
+        if (action == null && acquireTimeoutMillis == -1) {
+            timeoutTask = null;
+            acquireTimeoutNanos = -1;
+        } else if (action == null && acquireTimeoutMillis != -1) {
+            throw new NullPointerException("action");
+        } else if (action != null && acquireTimeoutMillis < 0) {
+            throw new IllegalArgumentException("acquireTimeoutMillis: " + acquireTimeoutMillis
+                                               + " (acquireTimeoutMillis: >= 1)");
+        } else {
+            acquireTimeoutNanos = TimeUnit.MILLISECONDS.toNanos(acquireTimeoutMillis);
+            switch (action) {
+            case Fail:
+                timeoutTask = new Runnable() {
+                    @Override
+                    public void run() {
+                        long nanoTime = System.nanoTime() - acquireTimeoutNanos;
+                        assert executor.inEventLoop();
+                        for (;;) {
+                            AcquireTask<C, K> task = pendingAcquireQueue.peek();
+                            if (task == null || task.nanos >= nanoTime) {
+                                break;
+                            }
+                            --pendingAcquireCount;
+                            task.promise.setFailure(TIMEOUT_EXCEPTION);
+                        }
+                    }
+                };
+                break;
+            case NewConnection:
+                timeoutTask = new Runnable() {
+                    @Override
+                    public void run() {
+                        long nanoTime = System.nanoTime() - acquireTimeoutNanos;
+                        assert executor.inEventLoop();
+                        for (;;) {
+                            AcquireTask<C, K> task = pendingAcquireQueue.peek();
+                            if (task == null || task.nanos >= nanoTime) {
+                                break;
+                            }
+                            ++acquiredChannelCount;
+                            --pendingAcquireCount;
+
+                            FixedChannelPool.super.acquire(task.key, task.promise);
+                        }
+                    }
+                };
+                break;
+            default:
+                throw new Error();
+            }
         }
         executor = bootstrap.group().next();
         this.maxConnections = maxConnections;
@@ -172,6 +243,9 @@ public final class FixedChannelPool<C extends Channel, K extends ChannelPoolKey>
                 originalPromise.setFailure(FULL_EXCEPTION);
             } else {
                 pendingAcquireQueue.offer(new AcquireTask<C, K>(key, p));
+                if (timeoutTask != null) {
+                    executor.schedule(timeoutTask, acquireTimeoutNanos, TimeUnit.NANOSECONDS);
+                }
             }
 
             assert pendingAcquireCount > 0;
@@ -233,6 +307,7 @@ public final class FixedChannelPool<C extends Channel, K extends ChannelPoolKey>
     private static final class AcquireTask<C, K> {
         private final K key;
         private final Promise<C> promise;
+        private final long nanos = System.nanoTime();
 
         public AcquireTask(final K key, Promise<C> promise) {
             this.key = key;
