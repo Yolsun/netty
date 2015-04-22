@@ -243,9 +243,10 @@ public final class FixedChannelPool<C extends Channel, K extends ChannelPoolKey>
 
             super.acquire(key, p);
         } else {
-            if (++pendingAcquireCount > maxPendingAcquires) {
+            if (pendingAcquireCount >= maxPendingAcquires) {
                 originalPromise.setFailure(FULL_EXCEPTION);
             } else {
+                ++pendingAcquireCount;
                 pendingAcquireQueue.offer(new AcquireTask<C, K>(key, p));
                 if (timeoutTask != null) {
                     executor.schedule(timeoutTask, acquireTimeoutNanos, TimeUnit.NANOSECONDS);
