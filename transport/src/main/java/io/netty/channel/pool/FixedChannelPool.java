@@ -152,6 +152,8 @@ public final class FixedChannelPool<C extends Channel, K extends ChannelPoolKey>
                             if (task == null || task.nanos >= nanoTime) {
                                 break;
                             }
+                            pendingAcquireQueue.remove();
+
                             --pendingAcquireCount;
                             task.promise.setFailure(TIMEOUT_EXCEPTION);
                         }
@@ -169,6 +171,8 @@ public final class FixedChannelPool<C extends Channel, K extends ChannelPoolKey>
                             if (task == null || task.nanos >= nanoTime) {
                                 break;
                             }
+                            pendingAcquireQueue.remove();
+
                             ++acquiredChannelCount;
                             --pendingAcquireCount;
 
