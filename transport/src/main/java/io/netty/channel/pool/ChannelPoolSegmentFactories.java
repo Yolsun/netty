@@ -24,6 +24,9 @@ import java.util.Queue;
 
 import static io.netty.util.internal.ObjectUtil.checkNotNull;
 
+/**
+ * Utilites for {@link ChannelPoolSegmentFactories}.
+ */
 public final class ChannelPoolSegmentFactories {
 
     private ChannelPoolSegmentFactories() {
